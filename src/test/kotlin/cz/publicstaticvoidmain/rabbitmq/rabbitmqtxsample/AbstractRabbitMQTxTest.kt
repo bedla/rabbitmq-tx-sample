@@ -10,11 +10,14 @@ import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import org.testcontainers.junit.jupiter.Testcontainers
 import java.nio.charset.StandardCharsets
-import java.time.Duration
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.toJavaDuration
 import kotlin.uuid.ExperimentalUuidApi
 import kotlin.uuid.Uuid
 
@@ -38,7 +41,7 @@ abstract class AbstractRabbitMQTxTest {
             username = rabbit.adminUsername
             password = rabbit.adminPassword
             requestedHeartbeat = 5
-            connectionTimeout = Duration.ofSeconds(5).toMillis().toInt()
+            connectionTimeout = 5.seconds.inWholeMilliseconds.toInt()
         }
 
         connection = factory.newConnection()
@@ -74,6 +77,34 @@ abstract class AbstractRabbitMQTxTest {
         worker.startOneShot(onProcessed = { done.countDown() })
 
         assertTrue(done.await(5, TimeUnit.SECONDS), "Worker did not process message in time")
+
+        val outMsg = getSingleMessage(connection, outputQueue)
+        assertEquals("processed:hello", outMsg)
+
+        val inMsg = getSingleMessage(connection, inputQueue)
+        assertNull(inMsg, "Message was not consumed")
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = [
+            "1s",
+            "5s",
+            "15s",
+        ]
+    )
+    fun `long running transaction`(durationStr: String) {
+        val duration = kotlin.time.Duration.parse((durationStr))
+
+        publish(connection, inputQueue, "hello")
+
+        // 2) worker (consumer+producer) in transaction
+        val worker = TxWorker(connection, inputQueue, outputQueue, onBeforeAck = { Thread.sleep(duration.toJavaDuration()) })
+
+        val done = CountDownLatch(1)
+        worker.startOneShot(onProcessed = { done.countDown() })
+
+        assertTrue(done.await((duration + 5.seconds).inWholeMilliseconds, TimeUnit.MILLISECONDS), "Worker did not process message in time")
 
         val outMsg = getSingleMessage(connection, outputQueue)
         assertEquals("processed:hello", outMsg)
